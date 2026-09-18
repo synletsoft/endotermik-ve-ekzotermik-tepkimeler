@@ -522,11 +522,13 @@ export class EnergyExperiment {
 		const wanted = new Map();
 		const color = COLORS[this.selection];
 		if (color) {
-			const width = this.selection === "system" ? 9 : 5;
+			const width = this.selection === "system" ? 12 : 5;
 			const mark = instance => wanted.set(instance, { color, width });
-			// System is the solution and its container.
-			if (this.selection === "system" || this.selection === "universe") {
+			// System is only the liquid/solution. Its thicker outline remains
+			// visible through the glass without outlining the beaker itself.
+			if (this.selection === "system" || this.selection === "universe")
 				mark(this.water);
+			if (this.selection === "universe") {
 				mark(this.o.arkabeher);
 				mark(this.o["önbeherdikkat"]);
 				if (this.spoon.isVisible && this.spoon.opacity > 0) mark(this.spoon);
