@@ -5,6 +5,13 @@ export const SETTINGS = Object.freeze({
 	thermometerDropMargin: 50,
 	blinkPeriod: 1.2,
 	pourFPS: 24,
+	stirBarMaxFPS: 90,
+	stirBarAccelerationSeconds: 1.3,
+	stirBarDecelerationSeconds: 2,
+	// Frames 132 and 161 have the same horizontal pose. Advancing through
+	// [132, 161) forms one clean revolution without replaying the lead-in.
+	stirBarLoopStart: 132,
+	stirBarLoopEnd: 161,
 	spoonLiftFPS: 52,
 	thermometerLiftFPS: 30,
 	spoonReturnSeconds: 0.24,
@@ -19,8 +26,18 @@ export const SETTINGS = Object.freeze({
 	waterLastFrame: 189,
 	thermometerApproachSeconds: 0.45,
 	thermometerInsertSeconds: 0.8,
-	nh4cl: { seconds: 18, temperature: 12 },
-	ch3coona: { seconds: 22, temperature: 50 }
+	nh4cl: {
+		seconds: 18,
+		temperature: 12,
+		pourAnimation: "dokulme2",
+		finalAnimation: "son2"
+	},
+	ch3coona: {
+		seconds: 22,
+		temperature: 50,
+		pourAnimation: "dokulme",
+		finalAnimation: "son"
+	}
 });
 
 const WHITE = [1, 1, 1];
@@ -28,6 +45,7 @@ const COLORS = { system: [1, 0.647, 0], surroundings: [0, 0.67, 1], universe: [0
 const BUTTONS = { system: "sistembt", surroundings: "Çevrebt", universe: "Evrenbt" };
 const clamp = (n, low, high) => Math.max(low, Math.min(high, n));
 const smooth = p => p * p * (3 - 2 * p);
+const isPourAnimation = name => ["dokulme", "dokulme2"].includes(String(name).toLowerCase());
 
 function inRect(sprite, x, y, margin = 0) {
 	const r = sprite.getBoundingBox();
@@ -49,6 +67,7 @@ export class EnergyExperiment {
 		this.runtime = runtime;
 		this.o = {};
 		for (const name of ["img", "img2", "img3", "arkabeher", "önbeherdikkat", "arkaplan",
+			"DonerPlastik",
 			"karistiriciacik", "paremetre", "NH4Cl", "CH3COONa", "OFFbt", "gösterge",
 			"sistembt", "Çevrebt", "Evrenbt", "Ekzotermik", "Endotermikbt"])
 			this.o[name] = runtime.objects[name].getFirstInstance();
@@ -65,6 +84,9 @@ export class EnergyExperiment {
 		this.time = 0;
 		this.mixTime = 0;
 		this.stirring = false;
+		this.stirBarSpeed = 0;
+		this.stirBarFrame = 0;
+		this.stirBarStopping = false;
 		// The three concept buttons are available throughout the experiment.
 		this.unlocked = true;
 		this.selection = null;
@@ -84,8 +106,9 @@ export class EnergyExperiment {
 			this.o[name].animationFrame = 0;
 		for (const name of Object.values(BUTTONS)) this.o[name].opacity = 1;
 		this.water.animationFrame = 0;
+		this.o.DonerPlastik.animationFrame = 0;
 		this.onPourEnd = event => {
-			if (String(event.animationName).toLowerCase() === "dokulme" && this.stage === "pouring")
+			if (isPourAnimation(event.animationName) && this.stage === "pouring")
 				this.finishPour();
 		};
 		this.spoon.addEventListener("animationend", this.onPourEnd);
@@ -276,7 +299,7 @@ export class EnergyExperiment {
 	startPour(x = this.water.x + 34.5, y = this.water.y - 167) {
 		this.stage = "pouring";
 		this.water.stopAnimation();
-		still(this.spoon, "dokulme");
+		still(this.spoon, SETTINGS[this.salt].pourAnimation);
 		this.spoon.setPosition(x, y);
 		this.spoon.animationSpeed = SETTINGS.pourFPS;
 		this.spoon.startAnimation("beginning");
@@ -287,14 +310,14 @@ export class EnergyExperiment {
 		// stuck on the final pouring frame.
 		if (this.stage !== "pouring") return;
 		this.stage = "thermometer";
-		still(this.spoon, "son");
+		still(this.spoon, SETTINGS[this.salt].finalAnimation);
 		// The pouring position follows the user's drop point, but the remaining
 		// salt must always settle in the middle of the beaker instead of sliding.
 		this.spoon.setPosition(this.water.x + 34.5, this.water.y - 167);
 		this.spoon.opacity = 1;
 		this.spoon.moveAdjacentToInstance(this.o["önbeherdikkat"], false);
-		// 'son' contains only the salt remaining in the beaker. Creating a second
-		// Sprite here is unnecessary and can interrupt this transition in C3.
+		// The selected salt's final frame contains only the material remaining in
+		// the beaker. A second Sprite could interrupt this transition in C3.
 		this.restingSpoon = null;
 		this.renderOutlines();
 	}
@@ -352,12 +375,18 @@ export class EnergyExperiment {
 	}
 
 	toggleStirrer() {
-		if (!["ready", "mixing", "complete"].includes(this.stage)) return;
+		if (!["ready", "mixing"].includes(this.stage)) return;
 		this.playSound("click");
 		this.stirring = !this.stirring;
 		this.o.OFFbt.animationFrame = this.stirring ? 1 : 0;
 		this.o.karistiriciacik.animationFrame = this.stirring ? 1 : 0;
 		if (this.stirring) {
+			this.stirBarStopping = false;
+			if (this.stirBarFrame < SETTINGS.stirBarLoopStart ||
+				this.stirBarFrame >= SETTINGS.stirBarLoopEnd)
+				this.stirBarFrame = SETTINGS.stirBarLoopStart;
+			this.o.DonerPlastik.stopAnimation();
+			this.o.DonerPlastik.animationFrame = Math.floor(this.stirBarFrame);
 			if (this.stage === "ready") {
 				this.stage = "mixing";
 				this.conceptHint = true;
@@ -367,8 +396,40 @@ export class EnergyExperiment {
 			// Speed zero prevents Construct from looping independently.
 			this.water.animationSpeed = 0;
 			this.water.startAnimation();
-		} else this.water.stopAnimation();
+		} else {
+			this.water.stopAnimation();
+			this.stirBarStopping = true;
+		}
 		this.renderOutlines();
+	}
+
+	updateStirBar(dt) {
+		if (!this.stirring && !this.stirBarStopping) return;
+		if (this.stirBarStopping) {
+			this.stirBarSpeed = Math.max(0, this.stirBarSpeed -
+				SETTINGS.stirBarMaxFPS * dt / SETTINGS.stirBarDecelerationSeconds);
+		} else if (this.stirring && this.stage === "mixing") {
+			this.stirBarSpeed = Math.min(SETTINGS.stirBarMaxFPS, this.stirBarSpeed +
+				SETTINGS.stirBarMaxFPS * dt / SETTINGS.stirBarAccelerationSeconds);
+		}
+		if (this.stirBarSpeed > 0) {
+			const span = SETTINGS.stirBarLoopEnd - SETTINGS.stirBarLoopStart;
+			this.stirBarFrame += this.stirBarSpeed * dt;
+			this.stirBarFrame = SETTINGS.stirBarLoopStart +
+				(this.stirBarFrame - SETTINGS.stirBarLoopStart) % span;
+			this.o.DonerPlastik.animationFrame = Math.floor(this.stirBarFrame);
+		}
+		if (this.stirBarStopping && this.stirBarSpeed === 0) {
+			this.stirBarStopping = false;
+		}
+	}
+
+	finishStirring() {
+		this.stirring = false;
+		this.stirBarStopping = true;
+		this.o.OFFbt.animationFrame = 0;
+		this.o.karistiriciacik.animationFrame = 0;
+		this.water.stopAnimation();
 	}
 
 	chooseConcept(selection) {
@@ -462,7 +523,7 @@ export class EnergyExperiment {
 		}
 		// Animation-end events can be skipped if a tab loses focus at the last
 		// frame. Frame checks keep both required transitions deterministic.
-		if (this.stage === "pouring" && String(this.spoon.animationName).toLowerCase() === "dokulme" &&
+		if (this.stage === "pouring" && isPourAnimation(this.spoon.animationName) &&
 			this.spoon.animationFrame >= 59) this.finishPour();
 		if (this.thermometerPending && this.thermometer.animationName === "Default" &&
 			this.thermometer.animationFrame >= 30) this.startThermometerInsertion();
@@ -482,6 +543,7 @@ export class EnergyExperiment {
 				if (p === 1) this.finishThermometerInsertion();
 			}
 		}
+		this.updateStirBar(dt);
 		if (this.stirring) {
 			if (this.stage === "mixing") {
 				this.mixTime += dt;
@@ -496,7 +558,7 @@ export class EnergyExperiment {
 				if (progress === 1) {
 					this.stage = "complete";
 					this.spoon.isVisible = false;
-					this.water.stopAnimation();
+					this.finishStirring();
 					this.answerHint = !this.answered;
 				}
 			}
@@ -535,7 +597,7 @@ export class EnergyExperiment {
 			}
 			// Surroundings deliberately excludes both the liquid and the beaker.
 			if (this.selection === "surroundings" || this.selection === "universe") {
-				for (const name of ["img2", "karistiriciacik", "NH4Cl", "CH3COONa",
+				for (const name of ["img2", "DonerPlastik", "karistiriciacik", "NH4Cl", "CH3COONa",
 					"paremetre", "OFFbt", "gösterge"])
 					mark(this.o[name]);
 				if (this.restingSpoon) mark(this.restingSpoon);
